@@ -1,0 +1,78 @@
+# =========================
+# Build directories
+# =========================
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+compile_commands.json
+
+# ns-3 specific build outputs
+*.o
+*.obj
+*.so
+*.a
+*.out
+*.exe
+
+# waf (if you're using waf instead of cmake)
+build/
+*.lock-waf_*
+.waf*
+
+# =========================
+# Logs / traces / outputs
+# =========================
+*.log
+*.tr
+*.pcap
+*.xml
+*.json
+*.txt
+
+# ns-3 simulation outputs (VERY important)
+*.mob
+*.routes
+
+# NetAnim output
+*.anim
+
+# FlowMonitor output
+*.flowmon
+
+# =========================
+# Python cache (if using bindings/scripts)
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+
+# =========================
+# IDE / Editor files
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Linux
+*~
+
+# =========================
+# Temporary / debug files
+# =========================
+tmp/
+temp/
+*.bak
+*.tmp
+
+# =========================
+# Large datasets (optional)
+# =========================
+data/
+datasets/
+results/
