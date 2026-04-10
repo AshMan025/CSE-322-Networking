@@ -1,6 +1,5 @@
 
 #!/bin/bash
-# Run all scenarios for TCP Westwood Project
 # Fixed version with correct sweeps and all 6 scenarios.
 
 RESULTS="scratch/tcp-westwood-project/results"

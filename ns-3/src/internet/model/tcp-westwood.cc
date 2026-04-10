@@ -8,7 +8,11 @@
 #include "ns3/nstime.h"
 #include "ns3/simulator.h"
 #include "ns3/traced-value.h"
+#include "ns3/uinteger.h"
 #include "tcp-socket-base.h"
+
+#include <algorithm>
+#include <cmath>
 
 namespace ns3 {
 
@@ -34,6 +38,11 @@ TypeId TcpWestwood::GetTypeId(void) {
                         TimeValue(MilliSeconds(50)),
                         MakeTimeAccessor(&TcpWestwood::m_minTau),
                         MakeTimeChecker())
+          .AddAttribute("RecentRttWindowSize",
+                        "Number of recent RTT samples used by the adaptive tau heuristic",
+                        UintegerValue(4),
+                        MakeUintegerAccessor(&TcpWestwood::m_recentRttWindowSize),
+                        MakeUintegerChecker<uint32_t>(2, 16))
           .AddTraceSource("CurrentTau", "Current value of Tau",
                           MakeTraceSourceAccessor(&TcpWestwood::m_tau),
                           "ns3::Time::TracedValueCallback");
@@ -46,7 +55,8 @@ TcpWestwood::TcpWestwood()
     : TcpNewReno(), m_currentBwe(0.0), m_filteredBwe(0.0),
       m_lastAckTime(Seconds(0)), m_minRtt(Time::Max()), m_ackedCount(0),
       m_accountedFor(0), m_rttVariance(0.0), m_avgRtt(Seconds(0)),
-      m_lossCount(0) {
+      m_recentAvgRtt(Seconds(0)), m_recentRttWindowSize(4), m_lossCount(0),
+      m_recentRttSum(0.0) {
   NS_LOG_FUNCTION(this);
   m_tau = m_baseTau; // Initialize tau
 }
@@ -59,8 +69,11 @@ TcpWestwood::TcpWestwood(const TcpWestwood &sock)
       m_minRtt(sock.m_minRtt), m_ackedCount(sock.m_ackedCount),
       m_accountedFor(sock.m_accountedFor), m_tau(sock.m_tau),
       m_baseTau(sock.m_baseTau), m_rttVariance(sock.m_rttVariance),
-      m_avgRtt(sock.m_avgRtt), m_minTau(sock.m_minTau), m_maxTau(sock.m_maxTau),
-      m_lossCount(sock.m_lossCount) {
+      m_avgRtt(sock.m_avgRtt), m_recentAvgRtt(sock.m_recentAvgRtt),
+      m_minTau(sock.m_minTau), m_maxTau(sock.m_maxTau),
+      m_recentRttWindowSize(sock.m_recentRttWindowSize),
+      m_lossCount(sock.m_lossCount), m_recentRttSamples(sock.m_recentRttSamples),
+      m_recentRttSum(sock.m_recentRttSum) {
   NS_LOG_FUNCTION(this);
 }
 
@@ -74,18 +87,7 @@ Ptr<TcpCongestionOps> TcpWestwood::Fork() {
 
 uint32_t TcpWestwood::AckedCount(uint32_t segmentsAcked,
                                  Ptr<TcpSocketState> tcb) {
-  // Basic implementation of AckedCount based on cumulative ACKs
-  // Section 2.3 of the paper discusses handling delayed ACKs.
-  // In NS-3, segmentsAcked tells us how many full segments were acked.
-  // We can use that directly or implement the more complex logic if we were
-  // parsing raw ACKs. Given TcpSocketState abstraction, we use segmentsAcked *
-  // segmentSize.
-
-  // NOTE: paper logic for d_k:
-  // if (ack > accounted_for) {
-  //    d_k = ack - accounted_for;
-  //    accounted_for = ack;
-  // }
+ 
 
   // In simple terms for NS-3's API:
   uint32_t bytesAcked = segmentsAcked * tcb->m_segmentSize;
@@ -93,55 +95,73 @@ uint32_t TcpWestwood::AckedCount(uint32_t segmentsAcked,
   return bytesAcked;
 }
 
-void TcpWestwood::AdaptTau(const Time &currentRtt) {
-  // Adaptive Tau Algorithm
-  // 1. Calculate RTT variance (EWMA)
-  // 2. Adjust Tau based on variance
 
-  double alpha = 0.125;
+// ok
+void TcpWestwood::AdaptTau(const Time &currentRtt) {
+  if (currentRtt.IsZero()) {
+    return;
+  }
+
+  const double alpha = 0.125;
+  const double currentRttS = currentRtt.ToDouble(Time::S);
 
   if (m_avgRtt.IsZero()) {
     m_avgRtt = currentRtt;
   } else {
     m_avgRtt = Time::FromDouble((1 - alpha) * m_avgRtt.ToDouble(Time::S) +
-                                    alpha * currentRtt.ToDouble(Time::S),
+                                    alpha * currentRttS,
                                 Time::S);
-
-    double diff =
-        std::abs(currentRtt.ToDouble(Time::S) - m_avgRtt.ToDouble(Time::S));
-    m_rttVariance = (1 - alpha) * m_rttVariance + alpha * (diff * diff);
   }
 
-  // Thresholds for variance (heuristic)
-  // High variance indicates instability -> increase Tau for stability
-  // Low variance -> decrease Tau for agility
-
-  // These thresholds might need tuning.
-  // Let's say if variance > (20ms)^2 we consider it high.
-  double highThreshold = 0.0004;  // 0.02 * 0.02
-  double lowThreshold = 0.000025; // 0.005 * 0.005
-
-  Time newTau = m_baseTau;
-
-  if (m_rttVariance > highThreshold) {
-    newTau = Time::FromDouble(m_baseTau.ToDouble(Time::S) * 2.0, Time::S);
-  } else if (m_rttVariance < lowThreshold) {
-    // Only if stable, maybe perform heuristic on loss?
-    // For now, simple variance based adaptation.
-    newTau = Time::FromDouble(m_baseTau.ToDouble(Time::S) * 0.5, Time::S);
+  m_recentRttSamples.push_back(currentRttS);
+  m_recentRttSum += currentRttS;
+  while (m_recentRttSamples.size() > m_recentRttWindowSize) {
+    m_recentRttSum -= m_recentRttSamples.front();
+    m_recentRttSamples.pop_front();
   }
 
-  // Clamp values
-  if (newTau > m_maxTau)
+  const double recentAvgS =
+      m_recentRttSum / static_cast<double>(m_recentRttSamples.size());
+  const double longAvgS = std::max(m_avgRtt.ToDouble(Time::S), 1e-6);
+  m_recentAvgRtt = Time::FromDouble(recentAvgS, Time::S);
+
+  double recentVariance = 0.0;
+  for (double sample : m_recentRttSamples) {
+    const double diff = sample - recentAvgS;
+    recentVariance += diff * diff;
+  }
+  recentVariance /= static_cast<double>(m_recentRttSamples.size());
+  m_rttVariance = recentVariance;
+
+  const double recentJitterRatio = std::sqrt(m_rttVariance) / longAvgS;
+  const double recentShiftRatio = std::abs(recentAvgS - longAvgS) / longAvgS;
+  const double stressScore = 0.65 * recentShiftRatio + 0.35 * recentJitterRatio;
+
+  const double fillRatio =
+      std::min(1.0, static_cast<double>(m_recentRttSamples.size()) /
+                        static_cast<double>(m_recentRttWindowSize));
+  const double normalizedStress = std::min(1.0, stressScore / 0.25);
+  double tauMultiplier = 0.60 + normalizedStress * 1.40;
+  tauMultiplier = 1.0 + (tauMultiplier - 1.0) * fillRatio;
+
+  Time newTau =
+      Time::FromDouble(m_baseTau.ToDouble(Time::S) * tauMultiplier, Time::S);
+
+  if (newTau > m_maxTau) {
     newTau = m_maxTau;
-  if (newTau < m_minTau)
+  }
+  if (newTau < m_minTau) {
     newTau = m_minTau;
+  }
 
   m_tau = newTau;
 
   NS_LOG_INFO(Simulator::Now().GetSeconds()
-              << " RTT=" << m_avgRtt.GetMilliSeconds()
-              << " Var=" << m_rttVariance
+              << " RTTcur=" << currentRtt.GetMilliSeconds()
+              << "ms RTTrecent=" << m_recentAvgRtt.GetMilliSeconds()
+              << "ms RTTlong=" << m_avgRtt.GetMilliSeconds()
+              << "ms Var=" << m_rttVariance
+              << " Stress=" << stressScore
               << " Tau=" << m_tau.Get().GetMilliSeconds() << "ms");
 }
 

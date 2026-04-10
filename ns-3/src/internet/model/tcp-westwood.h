@@ -1,10 +1,11 @@
 /*
  * TCP Westwood Implementation for NS-3
- * Based on the original TCP Westwood paper and requirements.
- */
+  */
 
 #ifndef TCP_WESTWOOD_ALGORITHM_H
 #define TCP_WESTWOOD_ALGORITHM_H
+
+#include <deque>
 
 #include "ns3/traced-value.h"
 #include "tcp-congestion-ops.h"
@@ -70,10 +71,14 @@ private:
 
   // Adaptive Tau State
   double m_rttVariance; //!< Estimated RTT variance
-  Time m_avgRtt;        //!< Average RTT (smoothed)
+  Time m_avgRtt;        //!< Long-term RTT average (smoothed)
+  Time m_recentAvgRtt;  //!< Average of the most recent RTT samples
   Time m_minTau;        //!< Minimum allowed tau
   Time m_maxTau;        //!< Maximum allowed tau
+  uint32_t m_recentRttWindowSize; //!< Window size for recent RTT averaging
   uint32_t m_lossCount; //!< Loss events counter (if needed for heuristic)
+  std::deque<double> m_recentRttSamples; //!< Recent RTT samples in seconds
+  double m_recentRttSum; //!< Running sum for the recent RTT window
 
   // Internal Methods
   void EstimateBW(uint32_t segmentsAcked, const Time &rtt,

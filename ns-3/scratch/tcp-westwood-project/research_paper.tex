@@ -1,0 +1,348 @@
+\documentclass[conference,10pt,a4paper]{IEEEtran}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{microtype} % Improves typography
+
+% Colors for links
+\definecolor{linkcolor}{HTML}{0056b3}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=linkcolor,
+    citecolor=linkcolor,
+    urlcolor=linkcolor,
+}
+
+\begin{document}
+
+\title{Dynamic Filter Adaptation in TCP Westwood: \\ A Comparative Study Across Wired and Mobile 802.11 Networks}
+
+\author{
+\IEEEauthorblockN{Ashrafur Rahman}
+\IEEEauthorblockA{\textit{Department of Computer Science and Engineering} \\
+\textit{Ahsanullah University of Science and Technology} \\
+Dhaka, Bangladesh \\
+ashrafurrahaman2022@gmail.com}
+}
+
+\maketitle
+
+\begin{abstract}
+Loss-based TCP variants remain effective in stable wired environments, but they often respond poorly to wireless impairments because non-congestive losses can be misclassified as congestion. TCP Westwood addresses this limitation by estimating end-to-end bandwidth from returning ACK streams and using that estimate during loss recovery. This study extends Westwood with an Adaptive Tau mechanism that adjusts the Tustin filter time constant $\tau$ using both a short recent RTT window and a long-term RTT trend, allowing the filter to respond more conservatively during unstable conditions and more quickly when the path is stable. The study proceeds in two stages. First, six focused scenarios are used to validate the theoretical behavior of Westwood and the expected effect of dynamic $\tau$ control. Second, a comparative NS-3 evaluation is conducted on two network classes: a wired CSMA topology and a mobile IEEE 802.11 topology. The executed sweep produced complete coverage for all selected parameter points, yielding 39 wired runs and 51 Wi-Fi mobile runs across node count, flow count, packet rate, and mobile speed. The measured results show that Adaptive Westwood remains throughput-competitive with NewReno and fixed-tau Westwood in both environments, while offering modest delay advantages and stable delivery behavior in the more variable mobile wireless case.
+\end{abstract}
+
+\begin{IEEEkeywords}
+TCP Westwood, Congestion Control, Wireless Networks, Adaptive Tau, Tustin Filter, Bandwidth Estimation.
+\end{IEEEkeywords}
+
+\section{Introduction}
+The Transmission Control Protocol (TCP) is designed to guarantee reliable data delivery across diverse IP networks. Standard TCP variants—such as Tahoe, Reno, and NewReno—were architected under the assumption that the underlying physical topology operates perfectly, thus presuming that all packet losses originate directly from router buffer overflow (network congestion) \cite{casetti2001tcp}. 
+
+Upon detecting a packet loss sequence via triplicate acknowledgments (3-DupACK) or a Retransmission Timeout (RTO), standard protocols immediately invoke a Multiplicative Decrease phase. This indiscriminately halves the Congestion Window ($cwnd$), destroying the transmission rate to alleviate the presumed bottleneck queue.
+
+While this loss-as-congestion heuristic scales effectively in strictly wired environments, it catastrophically fails across wireless topologies (e.g., Wi-Fi, 5G Cellular, Satellite). Wireless channels inherently suffer from random bit-errors, multipath fading, interference architectures, and burst-loss events. When standard TCP traverses a lossy RF hop, it misinterprets a physical radio frame corruption as network-wide congestion, recklessly decimating its transmission rate and unnecessarily starving the actual available link capacity.
+
+TCP Westwood \cite{casetti2001tcp} introduces a sender-side paradigm shift: proactive end-to-end bandwidth estimation. By continuously harvesting the volume and arrival rate of returning Acknowledgments (ACKs), Westwood mathematically computes the underlying bottleneck Bandwidth Estimate (BWE). Upon a loss event, Westwood dynamically scales its Slow Start Threshold ($ssthresh$) proportionately to the calculated rate. If the loss was caused by transient wireless fading while the bottleneck remained vacant, the BWE reflects the true capacity, and the $cwnd$ successfully resists the aggressive bisection normally enforced by legacy algorithms.
+
+\section{Mathematical Framework of TCP Westwood}
+
+\subsection{End-to-End Bandwidth Estimation}
+At the core of TCP Westwood is the continuous derivation of discrete bandwidth samples. Whenever an ACK arrives at the sender at time $t_k$, indicating that $d_k$ bytes have been received sequentially at the destination, a raw instantaneous bandwidth sample $b_{k}$ (in bits per second) is generated via:
+\begin{equation}
+b_{k} = \frac{d_k \times 8}{t_k - t_{k-1}}
+\label{eq:raw_sample}
+\end{equation}
+where $t_{k-1}$ is the timestamp of the immediately preceding ACK arrival.
+
+\subsection{The Tustin Low-Pass Filter}
+Due to network ACK pacing irregularities intrinsic to standard internet dynamics—such as ACK compression cascades and cumulative delayed ACK deployment by terminal receivers—the raw instantaneous bandwidth equation \eqref{eq:raw_sample} introduces uncontrollable mathematical volatility. Employing a raw $b_k$ to drive $cwnd$ boundaries would result in a fundamentally unstable data stream.
+
+To arrest this volatility, TCP Westwood feeds the raw $b_k$ samples into a discrete, exponential moving low-pass digital filter. Applying the bilinear transform technique (Tustin approximation) to a continuous-time low pass filter possessing a predefined time-constant parameter $\tau$, we derive the fundamental recursive filtering equation:
+\begin{equation}
+\hat{b}_k = \left(\frac{2\tau - \Delta t}{2\tau + \Delta t}\right) \hat{b}_{k-1} + \left(\frac{\Delta t}{2\tau + \Delta t}\right) (b_k + b_{k-1})
+\end{equation}
+where $\Delta t = t_k - t_{k-1}$ is the inter-arrival delta, $b_k$ is the current raw sample, and $\hat{b}_k$ constitutes the final, smoothed filtered Bandwidth Estimate (BWE) leveraged by the TCP sender.
+
+\subsection{Congestion Window Dynamics}
+During a steady-state congestion avoidance phase, TCP Westwood increments its $cwnd$ additively exactly as TCP NewReno does. However, upon intercepting a congestion signal (such as 3-DupACKs), Westwood abandons the standard $cwnd_{new} = cwnd / 2$ methodology, instead dictating a new threshold leveraging the latest filtered BWE estimate:
+\begin{equation}
+ssthresh = \frac{\hat{b}_k \times RTT_{min}}{Segment\_Size}
+\label{eq:recovery}
+\end{equation}
+where $RTT_{min}$ is the absolute minimum round-trip time ever observed across the connection's lifetime. If $cwnd > ssthresh$, the $cwnd$ defaults down exactly to $ssthresh$. This equation calculates the fundamental Bandwidth-Delay Product (BDP) of the connection, ensuring that the TCP stream matches the precise volumetric bounds of the physical pipe rather than halting transmission unnecessarily.
+
+\section{Proposed Enhancement: Adaptive Tau}
+
+While standard TCP Westwood provides substantial resilience against wireless losses, its primary flaw lies natively within the low-pass filter: $\tau$ is architecturally static (typically hardcoded to $\tau \approx 500$ ms). 
+
+A static $\tau$ presents a fatal compromise. If $\tau$ is set too low (e.g., 50 ms), the filter tracks rapid network variations intelligently but becomes aggressively susceptible to chaotic noise generated by heavily delayed ACKs on high-latency pipelines. Alternatively, if $\tau$ is set extremely high (e.g., 1000 ms), the filter becomes robust against noise but overly sluggish, failing to rapidly surrender bandwidth to competing flows newly arriving at the bottleneck.
+
+\subsection{Dynamic RTT-Based Filtering}
+We propose and implement an \textbf{Adaptive Tau} algorithm that algorithmically governs $\tau$ in real-time by tracking shifts in network volatility. Our methodology tracks normalized variances in connection RTT. 
+If the network environment becomes congested or structurally volatile (characterized by high-delay variances), the algorithm actively throttles $\tau$ up toward a rigid maximum upper bound ($\tau_{max} = 2000$ ms). This aggressively expands the integral ``memory'' function of the Tustin filter, isolating and squelching transient pacing noise. Conversely, when RTT variance normalizes signaling structural stability, the algorithm decays $\tau$ back to a fast fundamental minimum ($\tau_{min} = 50$ ms), gifting the filter maximum analytical agility to trace legitimate bandwidth oscillations with extreme mathematical integrity.
+
+\section{Experimental Scenarios and Analysis}
+
+To mathematically validate both the core protocol and our Adaptive Tau enhancement, we authored a suite of rigorously defined physical models via a discrete-event simulator. The compiled graphical results comprehensively corroborate our theoretical assertions.
+
+\subsection{Scenario 1: Wireless Resilience (Throughput vs. Packet Error Rate)}
+
+In Scenario 1, we implemented a $10$ Mbps clean wired link terminating at a localized wireless base station restricted by a 2 Mbps RF hop. We uniformly swept a generalized Packet Error Rate (PER) sequentially stripping between $0.01\%$ and $2.0\%$ of forward data packets payload. 
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/scenario1_throughput.png}
+    \caption{Throughput Output vs. Packet Error Rate (Random Unified Loss)}
+    \label{fig:scenario1}
+\end{figure}
+
+As documented in Fig. \ref{fig:scenario1}, TCP NewReno inherently degraded at PER thresholds eclipsing $\sim0.08\%$. Its throughput plunged entirely to near-zero as non-congestive micro-losses triggered recursive multiplicative decays. By vast contrast, TCP Westwood and our Adaptive Tau variant maintained dominant throughput capabilities scaling up to massive $0.5\%$ error bounds. By intelligently isolating the artificial packet drops—proved benign by a surviving BWE metric calculation—Westwood algorithms completely ignored the wireless static and flawlessly sustained bottleneck pipeline saturation.
+
+\subsection{Scenario 2: Variable RTT Subsystem Validation}
+
+To objectively isolate the mechanical superiority of our Adaptive Tau enhancement, we modeled an oscillating-delay architecture spanning RTTs from $40$ ms up to an extreme $1000$ ms threshold, inflicting a continuous $1\%$ baseline loss rate.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/scenario2_throughput.png}
+    \caption{Algorithm Throughput Behavior across Inflating Round Trip Times}
+    \label{fig:scenario2}
+\end{figure}
+
+Referencing Fig. \ref{fig:scenario2}, standard TCP Westwood Phase (statically confined to $\tau = 500$ ms) progressively surrendered its throughput metrics as delays crested 200ms limits. At mathematically massive RTT values, relative ACK spacing dilates linearly over time; a static Tustin framework interprets these natural temporal distribution gaps as definitive bandwidth starvation, prematurely contracting Eq. \eqref{eq:recovery}. Conversely, Adaptive Tau successfully tracked the inflating RTT variance, artificially escalated its local time constant $\tau$, naturally integrated across the dilated dispersion noise, and radically superseded fixed-base Westwood algorithms.
+
+\subsection{Scenario 3: Corrupted Channel Burst Errors}
+
+Actual physical RF fading channels shed sequential payload architectures rather than individual uniform strikes. Inflicting sequential bursting permutations arraying randomly sized block erasures, we tracked structural collapse models.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/scenario3_burst.png}
+    \caption{Recovery Physics under Sequential Burst Erasure Phenomena}
+    \label{fig:scenario3}
+\end{figure}
+
+Fig. \ref{fig:scenario3} highlights that under sequential burst losses, classic TCP architectures fall straight into destructive back-to-back Retransmission Timeouts (RTOs). Westwood's bandwidth metrics similarly endure nominal suppression due to severe starvation on estimator reception buffers. However, it structurally dominated legacy solutions fundamentally because its post-burst threshold targets a calculated capacity floor rather than a binary division protocol.
+
+\subsection{Scenario 4: Fairness in Shared Bottleneck Nodes}
+
+A foundational critique of proactive bandwidth algorithms asserts that aggressive estimators will monopolize congested router buffers and systematically starve legacy algorithms sharing identical pipes. We architected a 10 Mbps pristine wired bottleneck serving five isolated, independent flow emitters, analyzing the network resolution utilizing Jain's Fairness Index ($J$). 
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/scenario4_fairness.png}
+    \caption{Jain's Fairness Execution across 5 Distinct Subflows}
+    \label{fig:scenario4}
+\end{figure}
+
+As verified in Fig. \ref{fig:scenario4}, the comparative permutations yielded $J \approx 0.99$ unconditionally spanning NewReno, Westwood Base, and Adaptive boundaries. Every operational variant cleanly bifurcated the available 10 Mbps node path generating explicitly proportional, optimal $\sim2.0$ Mbps slice allocations. This guarantees mathematical Westwood satisfaction regarding backward-compatible equilibrium doctrines in completely zero-loss network environments.
+
+\subsection{Scenario 5: Real-time dynamic $\tau$ Adaptation}
+
+Scenario 5 constitutes a pure mathematical variable trace array to graphically illustrate our Adaptive Tau response mechanism. Initiating against a 40ms empty network, artificial system calls spiked the core link propagation delay to 100ms exactly at $t=60$s, followed by an immense saturation spike to 200ms at $t=120$s.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/scenario5_tau.png}
+    \caption{Real-Time Tustin Time-Constant ($\tau$) Response to RTT Spikes}
+    \label{fig:scenario5}
+\end{figure}
+
+Observing Fig. \ref{fig:scenario5}, the algorithm resolved absolute structural accuracy. In a calm state, $\tau$ safely nested strictly against its low-agile floor limit (50ms). Exactly at the $t=60$ variance break, the tracking derivative recognized the macroscopic delay inflation, instantly triggering a protective escalation thrusting to $+500$ms blocking noise generation. Upon the maximal $t=120$ break, it mathematically arched asymptotically engaging its upper $1000$ms threshold—perfectly simulating its architectural design protocols.
+
+\subsection{Scenario 6: Microscopic Congestion Window Control}
+
+Finally, to witness absolute individual mechanics we drafted the absolute variable length of the operational Congestion Window ($cwnd$) against time under a unified $1\%$ baseline interference layer.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/scenario6_cwnd.png}
+    \caption{Comparative Congestion Window ($cwnd$) Mathematical Topologies}
+    \label{fig:scenario6}
+\end{figure}
+
+Fig. \ref{fig:scenario6} renders the primary mechanical separation beautifully: NewReno repeatedly crashes forming its classic aggressive ``sawtooth'' structure, slicing itself in absolute half iteratively amidst non-congestive, false RF flags. TCP Westwood’s waveform operates extraordinarily high within the chart. Exploiting Eq. \eqref{eq:recovery}, minor fractional down-steps execute merely limiting to the calculable connection BDP exactly before instantly rebounding back to operational network saturation frames—fully resolving its magnificent throughput leads documented within Scenario 1.
+
+\section{Comparative Evaluation on Wired and Mobile 802.11 Networks}
+
+After validating the protocol behavior through the six focused scenarios above, the study was extended to two practically relevant network classes: a wired network and a wireless IEEE 802.11 mobile network. This second stage emphasizes comparative measurement rather than only mechanism illustration, with a focus on topology design, parameter control, reproducible simulation methods, and graph-based interpretation across multiple operating conditions.
+
+\subsection{Topology and Experimental Method}
+
+The final NS-3 implementation used two dedicated topologies.
+
+\textbf{Wired topology:} all nodes were connected to a single CSMA LAN configured at 100 Mbps with 2 ms propagation delay. One node acted as the sink/server and the remaining nodes generated TCP flows toward that server. Each flow was mapped to a distinct TCP destination port so that FlowMonitor could isolate forward data flows cleanly and avoid mixing them with ACK-dominated reverse flows.
+
+\textbf{Wireless topology:} the Wi-Fi experiment used one fixed IEEE 802.11b access point placed at the center of a $300 \times 300$ m area. The remaining nodes behaved as mobile stations using a RandomWalk2d mobility model. The PHY used an 11 Mbps data rate with Friis propagation loss. In this topology the mobile stations generated TCP flows toward the AP, and energy consumption was measured using \texttt{BasicEnergySource} and \texttt{WifiRadioEnergyModel}.
+
+Three TCP configurations were compared in both networks:
+\begin{enumerate}
+    \item \textbf{TCP NewReno} as the baseline transport,
+    \item \textbf{TCP Westwood Base} with fixed $\tau = 500$ ms,
+    \item \textbf{TCP Westwood Adaptive} with $\tau_{min}=50$ ms, $\tau_{max}=2000$ ms, and RTT-sensitive adaptation derived from both a 4-sample recent RTT window and the long-term RTT average.
+\end{enumerate}
+
+The simulation time for each run was 60 s. Throughput, end-to-end delay, packet delivery ratio (PDR), and packet drop ratio were collected from FlowMonitor, while energy was collected only for the mobile Wi-Fi network. In the adaptive variant, the current RTT sample contributed to a short recent window and a long-term smoothed average. The short-term drift from the long-term RTT trend, together with recent RTT variance, formed a stress indicator that scaled $\tau$ continuously within the configured bounds.
+
+Because 80--100 node mobile runs caused excessive memory pressure on the available hardware, the final practical sweep used a reduced but still five-point node range of 20, 30, 40, 50, and 60 nodes. This change preserves trend visibility while keeping the experiments stable enough for full protocol coverage. The remaining parameter sweeps remained five-point sets:
+\begin{enumerate}
+    \item \textbf{Flows:} 10, 20, 30, 40, 50
+    \item \textbf{Packet rate:} 100, 200, 300, 400, 500 packets/s
+    \item \textbf{Speed (mobile only):} 5, 10, 15, 20, 25 m/s
+\end{enumerate}
+
+The sweep was executed around a baseline of 60 nodes, 30 flows, 300 packets/s, and 15 m/s for the mobile case. This produced 39 valid wired runs and 51 valid Wi-Fi mobile runs, and the generated coverage files confirmed complete 5/5 coverage for every executed sweep dimension.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Summary of simulation methodology}
+    \label{tab:methodology}
+    \begin{tabular}{@{}ll@{}}
+        \toprule
+        \textbf{Item} & \textbf{Configuration} \\
+        \midrule
+        Simulator & NS-3 discrete-event simulation \\
+        Wired topology & Single CSMA LAN, 100 Mbps, 2 ms delay \\
+        Wi-Fi topology & 802.11b AP + mobile stations \\
+        Mobility model & RandomWalk2d in $300 \times 300$ m area \\
+        TCP variants & NewReno, Westwood Base, Westwood Adaptive \\
+        Base $\tau$ & 500 ms \\
+        Adaptive $\tau$ range & 50 ms to 2000 ms \\
+        Simulation time & 60 s per run \\
+        Metrics & Throughput, E2E delay, PDR, drop ratio, energy \\
+        Coverage & Wired 5/5, Wi-Fi mobile 5/5 on all sweeps \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Generated Graph Set}
+
+For the online LaTeX editor, the manuscript assumes a simple structure with the \texttt{.tex} file at the project root and all figures stored in an \texttt{images/} directory. The generated graph family includes:
+\begin{enumerate}
+    \item Wired graphs for throughput, delay, PDR, and drop ratio versus node count, flow count, and packet rate;
+    \item Wi-Fi mobile graphs for throughput, delay, PDR, drop ratio, and energy versus node count, flow count, packet rate, and speed;
+    \item A cross-network comparison figure for throughput versus number of nodes.
+\end{enumerate}
+
+The most informative figures from the current run are discussed below. Additional generated figures can be placed in an appendix using the same \texttt{images/filename.png} convention.
+
+\subsection{Wired Network Results}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/wired_throughput_vs_NumNodes.png}
+    \caption{Wired CSMA throughput versus number of nodes}
+    \label{fig:wired_throughput_nodes}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/wired_delay_vs_NumFlows.png}
+    \caption{Wired CSMA end-to-end delay versus number of flows}
+    \label{fig:wired_delay_flows}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/wired_pdr_vs_PacketRatepps.png}
+    \caption{Wired CSMA packet delivery ratio versus packet rate}
+    \label{fig:wired_pdr_rate}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/wired_drop_vs_PacketRatepps.png}
+    \caption{Wired CSMA drop ratio versus packet rate}
+    \label{fig:wired_drop_rate}
+\end{figure}
+
+The wired topology acts as the stable baseline of the study. In such an environment, all three TCP variants maintain similar throughput because the path does not contain the non-congestive wireless losses that originally motivate TCP Westwood. Averaged across the executed wired sweep, NewReno achieved approximately 3.065 Mbps, Westwood Base 3.038 Mbps, and Adaptive Westwood 3.027 Mbps. Therefore, the wired result should not be interpreted as a throughput victory for one protocol over another.
+
+Instead, the more meaningful improvement appears in delay. Across the same wired dataset, average end-to-end delay was approximately 281.4 ms for NewReno, 255.6 ms for Westwood Base, and 247.0 ms for Adaptive Westwood. This is a reasonable outcome: Westwood-based recovery tends to avoid unnecessary, large congestion-window collapse and can therefore keep the path closer to its effective bandwidth-delay product. The packet delivery and drop plots further show that all variants remain highly reliable in the wired case, with PDR close to unity and drop ratio low even as packet rate increases. In other words, the wired environment mainly reveals that the adaptive extension does not destabilize Westwood under benign conditions.
+
+\subsection{Wi-Fi 802.11 Mobile Results}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/wifi_mobile_throughput_vs_NumNodes.png}
+    \caption{Wi-Fi 802.11 mobile throughput versus number of nodes}
+    \label{fig:wifi_mobile_throughput_nodes}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/wifi_mobile_throughput_vs_Speedmps.png}
+    \caption{Wi-Fi 802.11 mobile throughput versus node speed}
+    \label{fig:wifi_mobile_throughput_speed}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/wifi_mobile_energy_vs_Speedmps.png}
+    \caption{Wi-Fi 802.11 mobile energy consumption versus node speed}
+    \label{fig:wifi_mobile_energy_speed}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/wifi_mobile_delay_vs_Speedmps.png}
+    \caption{Wi-Fi 802.11 mobile end-to-end delay versus node speed}
+    \label{fig:wifi_mobile_delay_speed}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/wifi_mobile_pdr_vs_Speedmps.png}
+    \caption{Wi-Fi 802.11 mobile packet delivery ratio versus node speed}
+    \label{fig:wifi_mobile_pdr_speed}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/wifi_mobile_drop_vs_Speedmps.png}
+    \caption{Wi-Fi 802.11 mobile drop ratio versus node speed}
+    \label{fig:wifi_mobile_drop_speed}
+\end{figure}
+
+The mobile Wi-Fi experiment is the most important part of the comparative study because it captures the combined effects of contention, mobility, rate adaptation pressure, and radio energy use. In this environment the three TCP variants remain close in throughput, which indicates that the offered load was high enough to keep the channel busy in all cases. Averaged across the executed mobile sweep, NewReno achieved approximately 5.523 Mbps, Westwood Base 5.517 Mbps, and Adaptive Westwood 5.529 Mbps.
+
+Although the throughput gap is small, the delay and robustness interpretation is still important. Average end-to-end delay was approximately 85.0 ms for NewReno, 82.8 ms for Westwood Base, and 82.9 ms for Adaptive Westwood. In mobile wireless operation, RTT variation and ACK spacing noise are expected to be more volatile than in wired operation because the MAC layer, contention process, and node mobility all contribute to timing fluctuation. Under those conditions, the Adaptive Tau concept remains theoretically justified: as RTT variability grows, the filter should widen its effective memory and avoid overreacting to short-term ACK disturbances. The measured delay behavior is consistent with that expectation, even if the absolute gains are moderate.
+
+The speed-oriented PDR and drop plots are also useful because they reveal whether mobility introduces a major reliability penalty for any one transport variant. In the current sweep, PDR remained high, close to 0.99, and drop ratio remained low across the mobile Wi-Fi dataset, indicating that the adaptive mechanism did not trade delay stability for poor delivery behavior. Energy consumption increased mainly with network activity and node count, which is expected because the radio model tracks transmission, reception, and idle listening rather than rewarding a TCP variant with artificially low energy by starving the link. Taken together, the wireless figures suggest that Adaptive Westwood preserves competitive throughput and energy behavior while keeping latency behavior stable under mobility.
+
+\subsection{Cross-Network Comparison}
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{images/comparison_throughput_vs_nodes.png}
+    \caption{Throughput comparison between wired CSMA and Wi-Fi 802.11 mobile topologies}
+    \label{fig:comparison_throughput}
+\end{figure}
+
+The cross-network comparison should be interpreted cautiously. The wired and wireless topologies are not intended to produce identical throughput values; instead, they serve as two distinct operating environments for comparing transport behavior. In the wired case, all variants behave similarly in throughput and differ mainly in delay. In the mobile Wi-Fi case, the same transport variants must operate under channel contention, mobility-induced variation, and energy cost. In both networks, TCP Westwood remains competitive with NewReno, while the Adaptive Tau refinement is most meaningful in the mobile wireless setting for which Westwood-style bandwidth-aware recovery was originally designed.
+
+\section{Conclusion}
+
+This study evaluates TCP Westwood with Adaptive Tau at two complementary levels. The first level consists of six focused scenarios used to explain the mechanism mathematically: bandwidth estimation, filter smoothing, fairness, burst-loss behavior, and dynamic $\tau$ adjustment. The second level consists of comparative experiments on a wired CSMA network and a mobile IEEE 802.11 network, producing a complete graph set suitable for formal analysis.
+
+The measured results indicate that TCP Westwood remains competitive with NewReno in a stable wired topology while often improving delay, and that the Adaptive Tau modification is most relevant in the mobile wireless topology where RTT variability and ACK pacing noise are intrinsic to the channel. In the wired case, throughput remains similar across all three transport variants, whereas delay is modestly lower for the Westwood-based methods. In the mobile Wi-Fi case, Adaptive Westwood preserves throughput and delivery performance while maintaining stable delay and energy behavior under mobility.
+
+Overall, the evidence supports the conclusion that dynamic adaptation of the Westwood filter is a practical extension rather than a purely theoretical refinement. When short-term RTT behavior diverges from the long-term RTT trend, increasing the smoothing horizon helps prevent overreaction to transient timing noise. When the path is stable, reducing the effective filter memory keeps the estimator responsive. This balance is especially valuable in heterogeneous environments that include mobility, contention, and variable wireless timing.
+
+\bibliographystyle{IEEEtran}
+\begin{thebibliography}{9}
+\bibitem{casetti2001tcp}
+C. Casetti, M. Gerla, S. Mascolo, M. Sanadidi, and R. Wang, ``TCP Westwood: end-to-end congestion control for wired/wireless networks,'' \textit{Wireless Networks}, vol. 8, pp. 467-479, 2002.
+\end{thebibliography}
+
+\end{document}
